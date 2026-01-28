@@ -1,4 +1,5 @@
 
+#include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
@@ -45,12 +46,43 @@ void sendJson(AsyncWebServerRequest *request, JsonDocument &doc, int code = 200)
   res->addHeader("Access-Control-Allow-Headers", "Content-Type");
   request->send(res);
 }
+// --- Smoothing & calibration ---
+const size_t SAMPLES = 20; // number of samples for moving average
+const uint16_t SAMPLE_DELAY_MS = 25;
+float calibration_gain = 1.000f;   // multiply to adjust scale
+int16_t calibration_offset_mv = 0; // add/subtract to adjust offset
+ADC_MODE(ADC_VCC);                 // Configure ADC to measure Vcc
+
+uint32_t readVccRawMv()
+{
+  // ESP.getVcc() returns millivolts (requires ADC_MODE(ADC_VCC))
+
+  return ESP.getVcc();
+}
+
+uint32_t readVccSmoothedMv()
+{
+  uint32_t acc = 0;
+  for (size_t i = 0; i < SAMPLES; i++)
+  {
+    acc += readVccRawMv();
+    delay(SAMPLE_DELAY_MS);
+  }
+  uint32_t avg = acc / SAMPLES;
+  // Apply calibration (gain then offset)
+  float scaled = (float)avg * calibration_gain + (float)calibration_offset_mv;
+  return (uint32_t)roundf(scaled);
+}
 
 void setup()
 {
   Serial.begin(115200);
   u8g2.begin();
   pinMode(LED_PIN, OUTPUT);
+
+  // Optional: set calibration if you have a reference meter
+  calibration_gain = 1.000f;
+  calibration_offset_mv = 0;
 
   // Connect to WiFi
   WiFi.mode(WIFI_STA);
@@ -76,20 +108,55 @@ void setup()
   u8g2.drawStr(42, 25, (ipChar));
   u8g2.sendBuffer();
   // CORS preflight
-  server.on("/api/led", HTTP_OPTIONS, [](AsyncWebServerRequest *req)
+  /* server.on("/api/led", HTTP_OPTIONS, [](AsyncWebServerRequest *req)
             { req->send(204); });
+ */
+
+  // Read smoothed Vcc
+  uint32_t vcc_mv = readVccSmoothedMv();
+  float vcc_v = vcc_mv / 1000.0f;
+  
+}
+int i=0;
+void loop()
+{
+  if (toggle)
+  {
+    u8g2.drawStr(120, 10, "*");
+    toggle = false;
+  }
+  else
+  {
+    clearTextLine(120, 10, 10);
+    toggle = true;
+  }
+  // Read Vcc
+  // Read smoothed Vcc
+  uint32_t vcc_mv = readVccSmoothedMv();
+  float vcc_v = vcc_mv / 1000.0f;
+i++;
+  // Display on OLED
+  u8g2.drawStr(0, 40, "Vcc:");
+  u8g2.drawStr(36, 40, String(vcc_v).c_str());
+
+  u8g2.sendBuffer();
+
+  // Print to serial
+  Serial.printf("Vcc: %lu mV (%.3f V)\n", vcc_mv, vcc_v);
 
   // GET /api/status
-  server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request)
+  server.on("/api/status", HTTP_GET, [vcc_v](AsyncWebServerRequest *request)
             {
     StaticJsonDocument<256> json;
     json["status"] = "ok";
     json["ip"] = WiFi.localIP().toString();
-    json["led_on"] = digitalRead(LED_PIN) == LOW; // ESP8266 LED is inverted
+    json["vcc_voltage"] = vcc_v;
+    json["InternalCounter"] = i;
+    //json["led_on"] = digitalRead(LED_PIN) == LOW; // ESP8266 LED is inverted
     sendJson(request, json); });
 
   // POST /api/led  { "on": true }
-  server.on("/api/led", HTTP_POST, [](AsyncWebServerRequest *request)
+  /* server.on("/api/led", HTTP_POST, [](AsyncWebServerRequest *request)
             {
               // Handler for when request completes
             },
@@ -113,21 +180,7 @@ void setup()
     res["ok"] = true;
     res["led_on"] = on;
     sendJson(request, res); });
-
+ */
   server.begin();
-}
-
-void loop()
-{
-  if (toggle)
-  {
-    u8g2.drawStr(120, 10, "*");
-    toggle = false;
-  }
-  else
-  {
-    clearTextLine(120, 10, 10);
-    toggle = true;
-  }
-  u8g2.sendBuffer();
+  delay(1000);
 }
